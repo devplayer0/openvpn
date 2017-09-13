@@ -247,11 +247,28 @@ mroute_extract_addr_ip(struct mroute_addr *src, struct mroute_addr *dest,
     return ret;
 }
 
+static void
+mroute_copy_ether_to_addr(struct mroute_addr *maddr,
+                          const uint8_t *eth_addr,
+                          uint16_t vid)
+{
+    maddr->type = MR_ADDR_ETHER;
+    maddr->netbits = 0;
+    memcpy(maddr->raw_addr, eth_addr, 6);
+#ifdef ENABLE_VLAN_TAGGING
+    maddr->len = 8;
+    memcpy(maddr->raw_addr + 6, &vid, 2);
+#else
+    maddr->len = 6;
+#endif /* ifdef ENABLE_VLAN_TAGGING */
+}
+
 unsigned int
 mroute_extract_addr_ether(struct mroute_addr *src,
                           struct mroute_addr *dest,
                           struct mroute_addr *esrc,
                           struct mroute_addr *edest,
+                          uint16_t vid,
                           const struct buffer *buf)
 {
     unsigned int ret = 0;
@@ -260,17 +277,11 @@ mroute_extract_addr_ether(struct mroute_addr *src,
         const struct openvpn_ethhdr *eth = (const struct openvpn_ethhdr *) BPTR(buf);
         if (src)
         {
-            src->type = MR_ADDR_ETHER;
-            src->netbits = 0;
-            src->len = 6;
-            memcpy(src->eth_addr, eth->source, sizeof(dest->eth_addr));
+            mroute_copy_ether_to_addr(src, eth->source, vid);
         }
         if (dest)
         {
-            dest->type = MR_ADDR_ETHER;
-            dest->netbits = 0;
-            dest->len = 6;
-            memcpy(dest->eth_addr, eth->dest, sizeof(dest->eth_addr));
+            mroute_copy_ether_to_addr(dest, eth->dest, vid);
 
             /* ethernet broadcast/multicast packet? */
             if (is_mac_mcast_addr(eth->dest))
@@ -287,7 +298,21 @@ mroute_extract_addr_ether(struct mroute_addr *src,
             struct buffer b = *buf;
             if (buf_advance(&b, sizeof(struct openvpn_ethhdr)))
             {
-                switch (ntohs(eth->proto))
+                uint16_t proto = ntohs(eth->proto);
+                if (proto == OPENVPN_ETH_P_8021Q
+                    && BLEN(buf) >= (int) sizeof(struct openvpn_8021qhdr))
+                {
+                    const struct openvpn_8021qhdr *tag = (const struct openvpn_8021qhdr *) BPTR(buf);
+                    proto = ntohs(tag->proto);
+                    buf_advance(&b, SIZE_ETH_TO_8021Q_HDR);
+                }
+                else
+                {
+                    /* It's an 8021q packet, but doesn't have a header, so something went wrong */
+                    ret = 0;
+                }
+
+                switch (proto)
                 {
                     case OPENVPN_ETH_P_IPV4:
                         ret |= (mroute_extract_addr_ip(esrc, edest, &b) << MROUTE_SEC_SHIFT);
@@ -442,6 +467,9 @@ mroute_addr_print_ex(const struct mroute_addr *ma,
             case MR_ADDR_ETHER:
                 buf_printf(&out, "%s", format_hex_ex(ma->eth_addr,
                                                      sizeof(ma->eth_addr), 0, 1, ":", gc));
+#ifdef ENABLE_VLAN_TAGGING
+                buf_printf(&out, "@%u", *(uint16_t *)(ma->raw_addr + 6));
+#endif
                 break;
 
             case MR_ADDR_IPV4:

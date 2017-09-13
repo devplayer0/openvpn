@@ -2210,7 +2210,8 @@ static void
 multi_bcast(struct multi_context *m,
             const struct buffer *buf,
             const struct multi_instance *sender_instance,
-            const struct mroute_addr *sender_addr)
+            const struct mroute_addr *sender_addr,
+            uint16_t vid)
 {
     struct hash_iterator hi;
     struct hash_element *he;
@@ -2561,6 +2562,7 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
                                                                &dest,
                                                                NULL,
                                                                NULL,
+                                                               0,
                                                                &c->c2.to_tun,
                                                                DEV_TYPE_TUN);
 
@@ -2592,7 +2594,7 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
                     if (mroute_flags & MROUTE_EXTRACT_MCAST)
                     {
                         /* for now, treat multicast as broadcast */
-                        multi_bcast(m, &c->c2.to_tun, m->pending, NULL);
+                        multi_bcast(m, &c->c2.to_tun, m->pending, NULL, 0);
                     }
                     else /* possible client to client routing */
                     {
@@ -2629,6 +2631,11 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
             }
             else if (TUNNEL_TYPE(m->top.c1.tuntap) == DEV_TYPE_TAP)
             {
+#ifdef ENABLE_VLAN_TAGGING
+                uint16_t vid = 0;
+#else
+                const uint16_t vid = 0;
+#endif
 #ifdef ENABLE_PF
                 struct mroute_addr edest;
                 mroute_addr_reset(&edest);
@@ -2642,6 +2649,7 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
 #else
                                                                NULL,
 #endif
+                                                               vid,
                                                                &c->c2.to_tun,
                                                                DEV_TYPE_TAP);
 
@@ -2654,7 +2662,7 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
                         {
                             if (mroute_flags & (MROUTE_EXTRACT_BCAST|MROUTE_EXTRACT_MCAST))
                             {
-                                multi_bcast(m, &c->c2.to_tun, m->pending, NULL);
+                                multi_bcast(m, &c->c2.to_tun, m->pending, NULL, vid);
                             }
                             else /* try client-to-client routing */
                             {
@@ -2728,6 +2736,12 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
         struct mroute_addr src, dest;
         const int dev_type = TUNNEL_TYPE(m->top.c1.tuntap);
 
+#ifdef ENABLE_VLAN_TAGGING
+        int16_t vid = 0;
+#else
+        const int16_t vid = 0;
+#endif
+
 #ifdef ENABLE_PF
         struct mroute_addr esrc, *e1, *e2;
         if (dev_type == DEV_TYPE_TUN)
@@ -2764,6 +2778,7 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
                                                        NULL,
 #endif
                                                        NULL,
+                                                       vid,
                                                        &m->top.c2.buf,
                                                        dev_type);
 
@@ -2776,9 +2791,9 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
             {
                 /* for now, treat multicast as broadcast */
 #ifdef ENABLE_PF
-                multi_bcast(m, &m->top.c2.buf, NULL, e2);
+                multi_bcast(m, &m->top.c2.buf, NULL, e2, vid);
 #else
-                multi_bcast(m, &m->top.c2.buf, NULL, NULL);
+                multi_bcast(m, &m->top.c2.buf, NULL, NULL, vid);
 #endif
             }
             else
@@ -2960,7 +2975,7 @@ gremlin_flood_clients(struct multi_context *m)
 
         for (i = 0; i < parm.n_packets; ++i)
         {
-            multi_bcast(m, &buf, NULL, NULL);
+            multi_bcast(m, &buf, NULL, NULL, 0);
         }
 
         gc_free(&gc);
