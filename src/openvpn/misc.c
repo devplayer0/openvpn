@@ -157,12 +157,10 @@ get_user_pass_cr(struct user_pass *up,
                 management_auth_failure(management, prefix, "previous auth credentials failed");
             }
 
-#ifdef ENABLE_CLIENT_CR
             if (auth_challenge && (flags & GET_USER_PASS_STATIC_CHALLENGE))
             {
                 sc = auth_challenge;
             }
-#endif
             if (!management_query_user_pass(management, up, prefix, flags, sc))
             {
                 if ((flags & GET_USER_PASS_NOFATAL) != 0)
@@ -272,7 +270,7 @@ get_user_pass_cr(struct user_pass *up,
          */
         if (username_from_stdin || password_from_stdin || response_from_stdin)
         {
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
             if (auth_challenge && (flags & GET_USER_PASS_DYNAMIC_CHALLENGE) && response_from_stdin)
             {
                 struct auth_challenge_info *ac = get_auth_challenge(auth_challenge, &gc);
@@ -299,7 +297,7 @@ get_user_pass_cr(struct user_pass *up,
                 }
             }
             else
-#endif /* ifdef ENABLE_CLIENT_CR */
+#endif /* ifdef ENABLE_MANAGEMENT */
             {
                 struct buffer user_prompt = alloc_buf_gc(128, &gc);
                 struct buffer pass_prompt = alloc_buf_gc(128, &gc);
@@ -333,7 +331,7 @@ get_user_pass_cr(struct user_pass *up,
                     }
                 }
 
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
                 if (auth_challenge && (flags & GET_USER_PASS_STATIC_CHALLENGE) && response_from_stdin)
                 {
                     char *response = (char *) gc_malloc(USER_PASS_LEN, false, &gc);
@@ -361,7 +359,7 @@ get_user_pass_cr(struct user_pass *up,
                     string_clear(resp64);
                     free(resp64);
                 }
-#endif /* ifdef ENABLE_CLIENT_CR */
+#endif /* ifdef ENABLE_MANAGEMENT */
             }
         }
 
@@ -380,7 +378,7 @@ get_user_pass_cr(struct user_pass *up,
     return true;
 }
 
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
 
 /*
  * See management/management-notes.txt for more info on the
@@ -455,52 +453,7 @@ get_auth_challenge(const char *auth_challenge, struct gc_arena *gc)
     }
 }
 
-#endif /* ifdef ENABLE_CLIENT_CR */
-
-#if AUTO_USERID
-
-void
-get_user_pass_auto_userid(struct user_pass *up, const char *tag)
-{
-    struct gc_arena gc = gc_new();
-    struct buffer buf;
-    uint8_t macaddr[6];
-    static uint8_t digest [MD5_DIGEST_LENGTH];
-    static const uint8_t hashprefix[] = "AUTO_USERID_DIGEST";
-
-    const md_kt_t *md5_kt = md_kt_get("MD5");
-    md_ctx_t *ctx;
-
-    CLEAR(*up);
-    buf_set_write(&buf, (uint8_t *)up->username, USER_PASS_LEN);
-    buf_printf(&buf, "%s", TARGET_PREFIX);
-    if (get_default_gateway_mac_addr(macaddr))
-    {
-        dmsg(D_AUTO_USERID, "GUPAU: macaddr=%s", format_hex_ex(macaddr, sizeof(macaddr), 0, 1, ":", &gc));
-        ctx = md_ctx_new();
-        md_ctx_init(ctx, md5_kt);
-        md_ctx_update(ctx, hashprefix, sizeof(hashprefix) - 1);
-        md_ctx_update(ctx, macaddr, sizeof(macaddr));
-        md_ctx_final(ctx, digest);
-        md_ctx_cleanup(ctx);
-        md_ctx_free(ctx);
-        buf_printf(&buf, "%s", format_hex_ex(digest, sizeof(digest), 0, 256, " ", &gc));
-    }
-    else
-    {
-        buf_printf(&buf, "UNKNOWN");
-    }
-    if (tag && strcmp(tag, "stdin"))
-    {
-        buf_printf(&buf, "-%s", tag);
-    }
-    up->defined = true;
-    gc_free(&gc);
-
-    dmsg(D_AUTO_USERID, "GUPAU: AUTO_USERID: '%s'", up->username);
-}
-
-#endif /* if AUTO_USERID */
+#endif /* ifdef ENABLE_MANAGEMENT */
 
 void
 purge_user_pass(struct user_pass *up, const bool force)
@@ -516,7 +469,7 @@ purge_user_pass(struct user_pass *up, const bool force)
      * don't show warning if the pass has been replaced by a token: this is an
      * artificial "auth-nocache"
      */
-    else if (!warn_shown && (!up->tokenized))
+    else if (!warn_shown)
     {
         msg(M_WARN, "WARNING: this configuration may cache passwords in memory -- use the auth-nocache option to prevent this");
         warn_shown = true;
@@ -524,14 +477,18 @@ purge_user_pass(struct user_pass *up, const bool force)
 }
 
 void
-set_auth_token(struct user_pass *up, const char *token)
+set_auth_token(struct user_pass *up, struct user_pass *tk, const char *token)
 {
-    if (token && strlen(token) && up && up->defined && !up->nocache)
+
+    if (token && strlen(token) && up && up->defined)
     {
-        CLEAR(up->password);
-        strncpynt(up->password, token, USER_PASS_LEN);
-        up->tokenized = true;
+        strncpynt(tk->password, token, USER_PASS_LEN);
+        strncpynt(tk->username, up->username, USER_PASS_LEN);
+        tk->defined = true;
     }
+
+    /* Cleans user/pass for nocache */
+    purge_user_pass(up, false);
 }
 
 /*
@@ -711,29 +668,6 @@ sanitize_control_message(const char *src, struct gc_arena *gc)
     }
     *dest = '\0';
     return ret;
-}
-
-/**
- * Will set or query for a global compat flag.  To modify the compat flags
- * the COMPAT_FLAG_SET must be bitwise ORed together with the flag to set.
- * If no "operator" flag is given it defaults to COMPAT_FLAG_QUERY,
- * which returns the flag state.
- *
- * @param  flag  Flag to be set/queried for bitwise ORed with the operator flag
- * @return Returns 0 if the flag is not set, otherwise the 'flag' value is returned
- */
-bool
-compat_flag(unsigned int flag)
-{
-    static unsigned int compat_flags = 0;
-
-    if (flag & COMPAT_FLAG_SET)
-    {
-        compat_flags |= (flag >> 1);
-    }
-
-    return (compat_flags & (flag >> 1));
-
 }
 
 #if P2MP_SERVER

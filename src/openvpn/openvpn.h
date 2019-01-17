@@ -42,10 +42,10 @@
 #include "sig.h"
 #include "misc.h"
 #include "mbuf.h"
+#include "pf.h"
 #include "pool.h"
 #include "plugin.h"
 #include "manage.h"
-#include "pf.h"
 
 /*
  * Our global key schedules, packaged thusly
@@ -66,6 +66,8 @@ struct key_schedule
     /* optional TLS control channel wrapping */
     struct key_type tls_auth_key_type;
     struct key_ctx_bi tls_wrap_key;
+    struct key_ctx tls_crypt_v2_server_key;
+    struct buffer tls_crypt_v2_wkc;             /**< Wrapped client key */
 };
 
 /*

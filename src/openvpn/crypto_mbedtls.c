@@ -39,6 +39,7 @@
 #include "errlevel.h"
 #include "basic.h"
 #include "buffer.h"
+#include "crypto.h"
 #include "integer.h"
 #include "crypto_backend.h"
 #include "otime.h"
@@ -140,26 +141,6 @@ const cipher_name_pair cipher_name_translation_table[] = {
 const size_t cipher_name_translation_table_count =
     sizeof(cipher_name_translation_table) / sizeof(*cipher_name_translation_table);
 
-static void
-print_cipher(const cipher_kt_t *info)
-{
-    if (info && (cipher_kt_mode_cbc(info)
-#ifdef HAVE_AEAD_CIPHER_MODES
-                 || cipher_kt_mode_aead(info)
-#endif
-                 ))
-    {
-        const char *ssl_only = cipher_kt_mode_cbc(info) ?
-                               "" : ", TLS client/server mode only";
-        const char *var_key_size = info->flags & MBEDTLS_CIPHER_VARIABLE_KEY_LEN ?
-                                   " by default" : "";
-
-        printf("%s  (%d bit key%s, %d bit block%s)\n",
-               cipher_kt_name(info), cipher_kt_key_size(info) * 8, var_key_size,
-               cipher_kt_block_size(info) * 8, ssl_only);
-    }
-}
-
 void
 show_available_ciphers(void)
 {
@@ -175,7 +156,8 @@ show_available_ciphers(void)
     while (*ciphers != 0)
     {
         const cipher_kt_t *info = mbedtls_cipher_info_from_type(*ciphers);
-        if (info && cipher_kt_block_size(info) >= 128/8)
+        if (info && !cipher_kt_insecure(info)
+            && (cipher_kt_mode_aead(info) || cipher_kt_mode_cbc(info)))
         {
             print_cipher(info);
         }
@@ -188,7 +170,8 @@ show_available_ciphers(void)
     while (*ciphers != 0)
     {
         const cipher_kt_t *info = mbedtls_cipher_info_from_type(*ciphers);
-        if (info && cipher_kt_block_size(info) < 128/8)
+        if (info && cipher_kt_insecure(info)
+            && (cipher_kt_mode_aead(info) || cipher_kt_mode_cbc(info)))
         {
             print_cipher(info);
         }
@@ -250,8 +233,8 @@ crypto_pem_encode(const char *name, struct buffer *dst,
 
     size_t out_len = 0;
     if (MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL !=
-            mbedtls_pem_write_buffer(header, footer, BPTR(src), BLEN(src),
-                                     NULL, 0, &out_len))
+        mbedtls_pem_write_buffer(header, footer, BPTR(src), BLEN(src),
+                                 NULL, 0, &out_len))
     {
         return false;
     }
@@ -550,6 +533,16 @@ cipher_kt_tag_size(const mbedtls_cipher_info_t *cipher_kt)
     return 0;
 }
 
+bool
+cipher_kt_insecure(const mbedtls_cipher_info_t *cipher_kt)
+{
+    return !(cipher_kt_block_size(cipher_kt) >= 128 / 8
+#ifdef MBEDTLS_CHACHAPOLY_C
+             || cipher_kt->type == MBEDTLS_CIPHER_CHACHA20_POLY1305
+#endif
+             );
+}
+
 int
 cipher_kt_mode(const mbedtls_cipher_info_t *cipher_kt)
 {
@@ -573,7 +566,11 @@ cipher_kt_mode_ofb_cfb(const cipher_kt_t *cipher)
 bool
 cipher_kt_mode_aead(const cipher_kt_t *cipher)
 {
-    return cipher && cipher_kt_mode(cipher) == OPENVPN_MODE_GCM;
+    return cipher && (cipher_kt_mode(cipher) == OPENVPN_MODE_GCM
+#ifdef MBEDTLS_CHACHAPOLY_C
+                      || cipher_kt_mode(cipher) == MBEDTLS_MODE_CHACHAPOLY
+#endif
+                      );
 }
 
 
@@ -861,7 +858,8 @@ md_ctx_new(void)
     return ctx;
 }
 
-void md_ctx_free(mbedtls_md_context_t *ctx)
+void
+md_ctx_free(mbedtls_md_context_t *ctx)
 {
     free(ctx);
 }

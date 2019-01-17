@@ -213,6 +213,12 @@ struct tls_wrap_ctx
     } mode;                     /**< Control channel wrapping mode */
     struct crypto_options opt;  /**< Crypto state */
     struct buffer work;         /**< Work buffer (only for --tls-crypt) */
+    struct key_ctx tls_crypt_v2_server_key;  /**< Decrypts client keys */
+    const struct buffer *tls_crypt_v2_wkc;   /**< Wrapped client key,
+                                              *   sent to server */
+    struct buffer tls_crypt_v2_metadata;     /**< Received from client */
+    bool cleanup_key_ctx;                    /**< opt.key_ctx_bi is owned by
+                                              *   this context */
 };
 
 /*
@@ -286,6 +292,9 @@ struct tls_options
     const char *config_authname;
     bool ncp_enabled;
 
+    bool tls_crypt_v2;
+    const char *tls_crypt_v2_verify_script;
+
     /** TLS handshake wrapping state */
     struct tls_wrap_ctx tls_wrap;
 
@@ -332,7 +341,7 @@ struct tls_options
 
     const struct x509_track *x509_track;
 
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
     const struct static_challenge_info *sci;
 #endif
 
@@ -553,11 +562,5 @@ struct tls_multi
      *   representing control channel
      *   sessions with the remote peer. */
 };
-
-
-#define SHOW_TLS_CIPHER_LIST_WARNING \
-    "Be aware that that whether a cipher suite in this list can actually work\n" \
-    "depends on the specific setup of both peers. See the man page entries of\n" \
-    "--tls-cipher and --show-tls for more details.\n\n"
 
 #endif /* SSL_COMMON_H_ */

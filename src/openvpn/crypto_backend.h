@@ -51,7 +51,7 @@
 typedef enum {
     MD_SHA1,
     MD_SHA256
-} hash_algo_type ;
+} hash_algo_type;
 
 /** Struct used in cipher name translation table */
 typedef struct {
@@ -283,6 +283,11 @@ int cipher_kt_block_size(const cipher_kt_t *cipher_kt);
  *                      determined.
  */
 int cipher_kt_tag_size(const cipher_kt_t *cipher_kt);
+
+/**
+ * Returns true if we consider this cipher to be insecure.
+ */
+bool cipher_kt_insecure(const cipher_kt_t *cipher);
 
 /**
  * Returns the mode that the cipher runs in.

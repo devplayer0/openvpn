@@ -159,7 +159,8 @@ ms_error_text(DWORD ms_err)
         /* trim to the left */
         if (rv)
         {
-            for (p = rv + strlen(rv) - 1; p >= rv; p--) {
+            for (p = rv + strlen(rv) - 1; p >= rv; p--)
+            {
                 if (isspace(*p))
                 {
                     *p = '\0';
@@ -198,7 +199,8 @@ err_put_ms_error(DWORD ms_err, int func, const char *file, int line)
     }
     /* since MS error codes are 32 bit, and the ones in the ERR_... system is
      * only 12, we must have a mapping table between them.  */
-    for (i = 0; i < ERR_MAP_SZ; i++) {
+    for (i = 0; i < ERR_MAP_SZ; i++)
+    {
         if (err_map[i].ms_err == ms_err)
         {
             ERR_PUT_error(ERR_LIB_CRYPTOAPI, func, err_map[i].err, file, line);
@@ -247,14 +249,16 @@ rsa_pub_dec(int flen, const unsigned char *from, unsigned char *to, RSA *rsa, in
  * Sign the hash in 'from' using NCryptSignHash(). This requires an NCRYPT
  * key handle in cd->crypt_prov. On return the signature is in 'to'. Returns
  * the length of the signature or 0 on error.
+ * If the hash_algo is not NULL, PKCS #1 DigestInfo header gets added
+ * to 'from', else it is signed as is.
  * For now we support only RSA and the padding is assumed to be PKCS1 v1.5
  */
 static int
-priv_enc_CNG(const CAPI_DATA *cd, const unsigned char *from, int flen,
-              unsigned char *to, int tlen, int padding)
+priv_enc_CNG(const CAPI_DATA *cd, const wchar_t *hash_algo, const unsigned char *from,
+             int flen, unsigned char *to, int tlen, int padding)
 {
     NCRYPT_KEY_HANDLE hkey = cd->crypt_prov;
-    DWORD len;
+    DWORD len = 0;
     ASSERT(cd->key_spec == CERT_NCRYPT_KEY_SPEC);
 
     msg(D_LOW, "Signing hash using CNG: data size = %d", flen);
@@ -262,11 +266,11 @@ priv_enc_CNG(const CAPI_DATA *cd, const unsigned char *from, int flen,
     /* The hash OID is already in 'from'.  So set the hash algorithm
      * in the padding info struct to NULL.
      */
-    BCRYPT_PKCS1_PADDING_INFO padinfo = {NULL};
+    BCRYPT_PKCS1_PADDING_INFO padinfo = {hash_algo};
     DWORD status;
 
-    status = NCryptSignHash(hkey, padding? &padinfo : NULL, (BYTE*) from, flen,
-                            to, tlen, &len, padding? BCRYPT_PAD_PKCS1 : 0);
+    status = NCryptSignHash(hkey, padding ? &padinfo : NULL, (BYTE *) from, flen,
+                            to, tlen, &len, padding ? BCRYPT_PAD_PKCS1 : 0);
     if (status != ERROR_SUCCESS)
     {
         SetLastError(status);
@@ -300,7 +304,7 @@ rsa_priv_enc(int flen, const unsigned char *from, unsigned char *to, RSA *rsa, i
     }
     if (cd->key_spec == CERT_NCRYPT_KEY_SPEC)
     {
-        return priv_enc_CNG(cd, from, flen, to, RSA_size(rsa), padding);
+        return priv_enc_CNG(cd, NULL, from, flen, to, RSA_size(rsa), padding);
     }
 
     /* Unfortunately, there is no "CryptSign()" function in CryptoAPI, that would
@@ -364,6 +368,70 @@ rsa_priv_enc(int flen, const unsigned char *from, unsigned char *to, RSA *rsa, i
     return len;
 }
 
+/*
+ * Sign the hash in |m| and return the signature in |sig|.
+ * Returns 1 on success, 0 on error.
+ * NCryptSignHash() is used to sign and it is instructed to add the
+ * the PKCS #1 DigestInfo header to |m| unless the hash algorithm is
+ * the MD5/SHA1 combination used in TLS 1.1 and earlier versions.
+ */
+static int
+rsa_sign_CNG(int type, const unsigned char *m, unsigned int m_len,
+             unsigned char *sig, unsigned int *siglen, const RSA *rsa)
+{
+    CAPI_DATA *cd = (CAPI_DATA *) RSA_meth_get0_app_data(RSA_get_method(rsa));
+    const wchar_t *alg = NULL;
+    int padding = RSA_PKCS1_PADDING;
+
+    *siglen = 0;
+    if (cd == NULL)
+    {
+        RSAerr(RSA_F_RSA_OSSL_PRIVATE_ENCRYPT, ERR_R_PASSED_NULL_PARAMETER);
+        return 0;
+    }
+
+    switch (type)
+    {
+        case NID_md5:
+            alg = BCRYPT_MD5_ALGORITHM;
+            break;
+
+        case NID_sha1:
+            alg = BCRYPT_SHA1_ALGORITHM;
+            break;
+
+        case NID_sha256:
+            alg = BCRYPT_SHA256_ALGORITHM;
+            break;
+
+        case NID_sha384:
+            alg = BCRYPT_SHA384_ALGORITHM;
+            break;
+
+        case NID_sha512:
+            alg = BCRYPT_SHA512_ALGORITHM;
+            break;
+
+        case NID_md5_sha1:
+            if (m_len != SSL_SIG_LENGTH)
+            {
+                RSAerr(RSA_F_RSA_SIGN, RSA_R_INVALID_MESSAGE_LENGTH);
+                return 0;
+            }
+            /* No DigestInfo header is required -- set alg-name to NULL */
+            alg = NULL;
+            break;
+
+        default:
+            msg(M_WARN, "cryptoapicert: Unknown hash type NID=0x%x", type);
+            RSAerr(RSA_F_RSA_SIGN, RSA_R_UNKNOWN_ALGORITHM_TYPE);
+            return 0;
+    }
+
+    *siglen = priv_enc_CNG(cd, alg, m, (int)m_len, sig, RSA_size(rsa), padding);
+    return (siglen == 0) ? 0 : 1;
+}
+
 /* decrypt */
 static int
 rsa_priv_dec(int flen, const unsigned char *from, unsigned char *to, RSA *rsa, int padding)
@@ -394,7 +462,7 @@ finish(RSA *rsa)
         return 0;
     }
     CAPI_DATA_free(cd);
-    RSA_meth_free((RSA_METHOD*) rsa_meth);
+    RSA_meth_free((RSA_METHOD *) rsa_meth);
     return 1;
 }
 
@@ -521,7 +589,7 @@ ssl_ctx_set_eckey(SSL_CTX *ssl_ctx, CAPI_DATA *cd, EVP_PKEY *pkey)
     if (cd->key_spec != CERT_NCRYPT_KEY_SPEC)
     {
         msg(M_NONFATAL, "ERROR: cryptoapicert with only legacy private key handle available."
-                    " EC certificate not supported.");
+            " EC certificate not supported.");
         goto err;
     }
     /* create a method struct with default callbacks filled in */
@@ -621,7 +689,8 @@ find_certificate_in_store(const char *cert_prop, HCERTSTORE cert_store)
 
         /* skip the tag */
         cert_prop += 6;
-        for (p = (char *) cert_prop, i = 0; *p && i < sizeof(hash); i++) {
+        for (p = (char *) cert_prop, i = 0; *p && i < sizeof(hash); i++)
+        {
             if (*p >= '0' && *p <= '9')
             {
                 x = (*p - '0') << 4;
@@ -674,7 +743,7 @@ ssl_ctx_set_rsakey(SSL_CTX *ssl_ctx, CAPI_DATA *cd, EVP_PKEY *pkey)
     bool rsa_method_set = false;
 
     my_rsa_method = RSA_meth_new("Microsoft Cryptography API RSA Method",
-                                  RSA_METHOD_FLAG_NO_CHECK);
+                                 RSA_METHOD_FLAG_NO_CHECK);
     check_malloc_return(my_rsa_method);
     RSA_meth_set_pub_enc(my_rsa_method, rsa_pub_enc);
     RSA_meth_set_pub_dec(my_rsa_method, rsa_pub_dec);
@@ -683,6 +752,15 @@ ssl_ctx_set_rsakey(SSL_CTX *ssl_ctx, CAPI_DATA *cd, EVP_PKEY *pkey)
     RSA_meth_set_init(my_rsa_method, NULL);
     RSA_meth_set_finish(my_rsa_method, finish);
     RSA_meth_set0_app_data(my_rsa_method, cd);
+
+    /* For CNG, set the RSA_sign method which gets priority over priv_enc().
+     * This method is called with the raw hash without the digestinfo
+     * header and works better when using NCryptSignHash() with some tokens.
+     */
+    if (cd->key_spec == CERT_NCRYPT_KEY_SPEC)
+    {
+        RSA_meth_set_sign(my_rsa_method, rsa_sign_CNG);
+    }
 
     rsa = RSA_new();
     if (rsa == NULL)
@@ -723,7 +801,7 @@ ssl_ctx_set_rsakey(SSL_CTX *ssl_ctx, CAPI_DATA *cd, EVP_PKEY *pkey)
         goto err;
     }
     /* SSL_CTX_use_RSAPrivateKey() increased the reference count in 'rsa', so
-     * we decrease it here with RSA_free(), or it will never be cleaned up. */
+    * we decrease it here with RSA_free(), or it will never be cleaned up. */
     RSA_free(rsa);
     return 1;
 
@@ -793,7 +871,7 @@ SSL_CTX_use_CryptoAPI_certificate(SSL_CTX *ssl_ctx, const char *cert_prop)
     DWORD flags = CRYPT_ACQUIRE_COMPARE_KEY_FLAG
                   | CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG;
     if (!CryptAcquireCertificatePrivateKey(cd->cert_context, flags, NULL,
-                    &cd->crypt_prov, &cd->key_spec, &cd->free_crypt_prov))
+                                           &cd->crypt_prov, &cd->key_spec, &cd->free_crypt_prov))
     {
         /* if we don't have a smart card reader here, and we try to access a
          * smart card certificate, we get:

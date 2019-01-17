@@ -52,9 +52,6 @@ const char **make_arg_array(const char *first, const char *parms, struct gc_aren
 
 const char **make_extended_arg_array(char **p, struct gc_arena *gc);
 
-/* an analogue to the random() function, but use OpenSSL functions if available */
-long int get_random(void);
-
 /* prepend a random prefix to hostname */
 const char *hostname_randomize(const char *hostname, struct gc_arena *gc);
 
@@ -66,7 +63,6 @@ struct user_pass
 {
     bool defined;
     bool nocache;
-    bool tokenized; /* true if password has been substituted by a token */
     bool wait_for_push; /* true if this object is waiting for a push-reply */
 
 /* max length of username/password */
@@ -79,7 +75,7 @@ struct user_pass
     char password[USER_PASS_LEN];
 };
 
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
 /*
  * Challenge response info on client as pushed by server.
  */
@@ -105,10 +101,10 @@ struct static_challenge_info {
     const char *challenge_text;
 };
 
-#else  /* ifdef ENABLE_CLIENT_CR */
+#else  /* ifdef ENABLE_MANAGEMENT */
 struct auth_challenge_info {};
 struct static_challenge_info {};
-#endif /* ifdef ENABLE_CLIENT_CR */
+#endif /* ifdef ENABLE_MANAGEMENT */
 
 /*
  * Flags for get_user_pass and management_query_user_pass
@@ -148,7 +144,8 @@ void fail_user_pass(const char *prefix,
 
 void purge_user_pass(struct user_pass *up, const bool force);
 
-void set_auth_token(struct user_pass *up, const char *token);
+void set_auth_token(struct user_pass *up, struct user_pass *tk,
+                    const char *token);
 
 /*
  * Process string received by untrusted peer before
@@ -162,23 +159,12 @@ void configure_path(void);
 
 const char *sanitize_control_message(const char *str, struct gc_arena *gc);
 
-#if AUTO_USERID
-void get_user_pass_auto_userid(struct user_pass *up, const char *tag);
-
-#endif
-
 /*
  * /sbin/ip path, may be overridden
  */
 #ifdef ENABLE_IPROUTE
 extern const char *iproute_path;
 #endif
-
-#define COMPAT_FLAG_QUERY         0       /** compat_flags operator: Query for a flag */
-#define COMPAT_FLAG_SET           (1<<0)  /** compat_flags operator: Set a compat flag */
-#define COMPAT_NAMES              (1<<1)  /** compat flag: --compat-names set */
-#define COMPAT_NO_NAME_REMAPPING  (1<<2)  /** compat flag: --compat-names without char remapping */
-bool compat_flag(unsigned int flag);
 
 #if P2MP_SERVER
 /* helper to parse peer_info received from multi client, validate

@@ -199,7 +199,16 @@ crypto_print_openssl_errors(const unsigned int flags)
                 "in common with the client. Your --tls-cipher setting might be "
                 "too restrictive.");
         }
-
+        else if (ERR_GET_REASON(err) == SSL_R_UNSUPPORTED_PROTOCOL)
+        {
+            msg(D_CRYPT_ERRORS, "TLS error: Unsupported protocol. This typically "
+                "indicates that client and server have no common TLS version enabled. "
+                "This can be caused by mismatched tls-version-min and tls-version-max "
+                "options on client and server. "
+                "If your OpenVPN client is between v2.3.6 and v2.3.2 try adding "
+                "tls-version-min 1.0 to the client configuration to use TLS 1.0+ "
+                "instead of TLS 1.0 only");
+        }
         msg(flags, "OpenSSL: %s", ERR_error_string(err, NULL));
     }
 }
@@ -245,6 +254,7 @@ const cipher_name_pair cipher_name_translation_table[] = {
     { "AES-128-GCM", "id-aes128-GCM" },
     { "AES-192-GCM", "id-aes192-GCM" },
     { "AES-256-GCM", "id-aes256-GCM" },
+    { "CHACHA20-POLY1305", "ChaCha20-Poly1305" },
 };
 const size_t cipher_name_translation_table_count =
     sizeof(cipher_name_translation_table) / sizeof(*cipher_name_translation_table);
@@ -262,21 +272,6 @@ cipher_name_cmp(const void *a, const void *b)
         translate_cipher_name_to_openvpn(EVP_CIPHER_name(*cipher_b));
 
     return strcmp(cipher_name_a, cipher_name_b);
-}
-
-static void
-print_cipher(const EVP_CIPHER *cipher)
-{
-    const char *var_key_size =
-        (EVP_CIPHER_flags(cipher) & EVP_CIPH_VARIABLE_LENGTH) ?
-        " by default" : "";
-    const char *ssl_only = cipher_kt_mode_cbc(cipher) ?
-                           "" : ", TLS client/server mode only";
-
-    printf("%s  (%d bit key%s, %d bit block%s)\n",
-           translate_cipher_name_to_openvpn(EVP_CIPHER_name(cipher)),
-           EVP_CIPHER_key_length(cipher) * 8, var_key_size,
-           cipher_kt_block_size(cipher) * 8, ssl_only);
 }
 
 void
@@ -320,8 +315,9 @@ show_available_ciphers(void)
 
     qsort(cipher_list, num_ciphers, sizeof(*cipher_list), cipher_name_cmp);
 
-    for (i = 0; i < num_ciphers; i++) {
-        if (cipher_kt_block_size(cipher_list[i]) >= 128/8)
+    for (i = 0; i < num_ciphers; i++)
+    {
+        if (!cipher_kt_insecure(cipher_list[i]))
         {
             print_cipher(cipher_list[i]);
         }
@@ -329,8 +325,9 @@ show_available_ciphers(void)
 
     printf("\nThe following ciphers have a block size of less than 128 bits, \n"
            "and are therefore deprecated.  Do not use unless you have to.\n\n");
-    for (i = 0; i < num_ciphers; i++) {
-        if (cipher_kt_block_size(cipher_list[i]) < 128/8)
+    for (i = 0; i < num_ciphers; i++)
+    {
+        if (cipher_kt_insecure(cipher_list[i]))
         {
             print_cipher(cipher_list[i]);
         }
@@ -410,7 +407,7 @@ crypto_pem_encode(const char *name, struct buffer *dst,
 cleanup:
     if (!BIO_free(bio))
     {
-        ret = false;;
+        ret = false;
     }
 
     return ret;
@@ -463,7 +460,7 @@ cleanup:
     OPENSSL_free(data_read);
     if (!BIO_free(bio))
     {
-        ret = false;;
+        ret = false;
     }
 
     return ret;
@@ -686,6 +683,16 @@ cipher_kt_tag_size(const EVP_CIPHER *cipher_kt)
     }
 }
 
+bool
+cipher_kt_insecure(const EVP_CIPHER *cipher)
+{
+    return !(cipher_kt_block_size(cipher) >= 128 / 8
+#ifdef NID_chacha20_poly1305
+             || EVP_CIPHER_nid(cipher) == NID_chacha20_poly1305
+#endif
+             );
+}
+
 int
 cipher_kt_mode(const EVP_CIPHER *cipher_kt)
 {
@@ -720,10 +727,22 @@ bool
 cipher_kt_mode_aead(const cipher_kt_t *cipher)
 {
 #ifdef HAVE_AEAD_CIPHER_MODES
-    return cipher && (cipher_kt_mode(cipher) == OPENVPN_MODE_GCM);
-#else
-    return false;
+    if (cipher)
+    {
+        switch (EVP_CIPHER_nid(cipher))
+        {
+            case NID_aes_128_gcm:
+            case NID_aes_192_gcm:
+            case NID_aes_256_gcm:
+#ifdef NID_chacha20_poly1305
+            case NID_chacha20_poly1305:
 #endif
+                return true;
+        }
+    }
+#endif
+
+    return false;
 }
 
 /*
@@ -945,7 +964,8 @@ md_ctx_new(void)
     return ctx;
 }
 
-void md_ctx_free(EVP_MD_CTX *ctx)
+void
+md_ctx_free(EVP_MD_CTX *ctx)
 {
     EVP_MD_CTX_free(ctx);
 }

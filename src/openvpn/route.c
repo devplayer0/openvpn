@@ -448,11 +448,6 @@ init_route_ipv6(struct route_ipv6 *r6,
     {
         r6->gateway = rl6->remote_endpoint_ipv6;
     }
-    else
-    {
-        msg(M_WARN, PACKAGE_NAME " ROUTE6: " PACKAGE_NAME " needs a gateway parameter for a --route-ipv6 option and no default was specified by either --route-ipv6-gateway or --ifconfig-ipv6 options");
-        goto fail;
-    }
 
     /* metric */
 
@@ -1917,6 +1912,16 @@ add_route_ipv6(struct route_ipv6 *r6, const struct tuntap *tt, unsigned int flag
         gateway_needed = true;
     }
 
+    if (gateway_needed && IN6_IS_ADDR_UNSPECIFIED(&r6->gateway))
+    {
+        msg(M_WARN, "ROUTE6 WARNING: " PACKAGE_NAME " needs a gateway "
+            "parameter for a --route-ipv6 option and no default was set via "
+            "--ifconfig-ipv6 or --route-ipv6-gateway option.  Not installing "
+            "IPv6 route to %s/%d.", network, r6->netbits);
+        status = false;
+        goto done;
+    }
+
 #if defined(TARGET_LINUX)
 #ifdef ENABLE_IPROUTE
     argv_printf(&argv, "%s -6 route add %s/%d dev %s",
@@ -2114,6 +2119,7 @@ add_route_ipv6(struct route_ipv6 *r6, const struct tuntap *tt, unsigned int flag
     msg(M_FATAL, "Sorry, but I don't know how to do 'route ipv6' commands on this operating system.  Try putting your routes in a --route-up script");
 #endif /* if defined(TARGET_LINUX) */
 
+done:
     if (status)
     {
         r6->flags |= RT_ADDED;
@@ -2991,16 +2997,12 @@ del_route_ipapi(const struct route_ipv4 *r, const struct tuntap *tt)
 static bool
 do_route_service(const bool add, const route_message_t *rt, const size_t size, HANDLE pipe)
 {
-    DWORD len;
     bool ret = false;
     ack_message_t ack;
     struct gc_arena gc = gc_new();
 
-    if (!WriteFile(pipe, rt, size, &len, NULL)
-        || !ReadFile(pipe, &ack, sizeof(ack), &len, NULL))
+    if (!send_msg_iservice(pipe, rt, size, &ack, "ROUTE"))
     {
-        msg(M_WARN, "ROUTE: could not talk to service: %s [%lu]",
-            strerror_win32(GetLastError(), &gc), GetLastError());
         goto out;
     }
 
@@ -3078,7 +3080,7 @@ do_route_ipv6_service(const bool add, const struct route_ipv6 *r, const struct t
      * (only do this for routes actually using the tun/tap device)
      */
     if (tt->type == DEV_TYPE_TUN
-	 && msg.iface.index == tt->adapter_index )
+        && msg.iface.index == tt->adapter_index)
     {
         inet_pton(AF_INET6, "fe80::8", &msg.gateway.ipv6);
     }
@@ -3247,6 +3249,12 @@ get_default_gateway(struct route_gateway_info *rgi)
     rgi->gateway.addr = 127 << 24 | 'd' << 16 | 'g' << 8 | 'w';
     rgi->flags |= RGI_ADDR_DEFINED;
     strcpy(best_name, "android-gw");
+
+    /*
+     * Skip scanning/fetching interface from loopback interface
+     * It always fails and "ioctl(SIOCGIFCONF) failed" confuses users
+     */
+    goto done;
 #endif /* ifndef TARGET_ANDROID */
 
     /* scan adapter list */
@@ -3296,7 +3304,7 @@ get_default_gateway(struct route_gateway_info *rgi)
                 if (rgi->flags & RGI_ON_LINK)
                 {
                     /* check that interface name of current interface
-                     * matches interface name of best default route */
+                    * matches interface name of best default route */
                     if (strcmp(ifreq.ifr_name, best_name))
                     {
                         continue;

@@ -139,6 +139,11 @@ struct connection_entry
     /* Shared secret used for TLS control channel authenticated encryption */
     const char *tls_crypt_file;
     const char *tls_crypt_inline;
+
+    /* Client-specific secret or server key used for TLS control channel
+     * authenticated encryption v2 */
+    const char *tls_crypt_v2_file;
+    const char *tls_crypt_v2_inline;
 };
 
 struct remote_entry
@@ -347,6 +352,7 @@ struct options
     const char *route_script;
     const char *route_predown_script;
     const char *route_default_gateway;
+    const char *route_ipv6_default_gateway;
     int route_default_metric;
     bool route_noexec;
     int route_delay;
@@ -354,6 +360,7 @@ struct options
     bool route_delay_defined;
     struct route_option_list *routes;
     struct route_ipv6_option_list *routes_ipv6;                 /* IPv6 */
+    bool block_ipv6;
     bool route_nopull;
     bool route_gateway_via_dhcp;
     bool allow_pull_fqdn; /* as a client, allow server to push a FQDN for certain parameters */
@@ -478,7 +485,7 @@ struct options
 
     int scheduled_exit_interval;
 
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
     struct static_challenge_info sc_info;
 #endif
 #endif /* if P2MP */
@@ -516,6 +523,7 @@ struct options
     const char *priv_key_file;
     const char *pkcs12_file;
     const char *cipher_list;
+    const char *cipher_list_tls13;
     const char *tls_cert_profile;
     const char *ecdh_curve;
     const char *tls_verify;
@@ -584,6 +592,17 @@ struct options
     /* Shared secret used for TLS control channel authenticated encryption */
     const char *tls_crypt_file;
     const char *tls_crypt_inline;
+
+    /* Client-specific secret or server key used for TLS control channel
+     * authenticated encryption v2 */
+    const char *tls_crypt_v2_file;
+    const char *tls_crypt_v2_inline;
+
+    const char *tls_crypt_v2_genkey_type;
+    const char *tls_crypt_v2_genkey_file;
+    const char *tls_crypt_v2_metadata;
+
+    const char *tls_crypt_v2_verify_script;
 
     /* Allow only one session */
     bool single_session;
@@ -832,9 +851,5 @@ void options_string_import(struct options *options,
                            const unsigned int permission_mask,
                            unsigned int *option_types_found,
                            struct env_set *es);
-
-bool get_ipv6_addr( const char *prefix_str, struct in6_addr *network,
-                    unsigned int *netbits, int msglevel );
-
 
 #endif /* ifndef OPTIONS_H */

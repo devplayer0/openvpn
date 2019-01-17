@@ -82,7 +82,6 @@ static DWORD get_adapter_index_flexible(const char *name);
 static bool
 do_address_service(const bool add, const short family, const struct tuntap *tt)
 {
-    DWORD len;
     bool ret = false;
     ack_message_t ack;
     struct gc_arena gc = gc_new();
@@ -115,11 +114,8 @@ do_address_service(const bool add, const short family, const struct tuntap *tt)
         addr.prefix_len = tt->netbits_ipv6;
     }
 
-    if (!WriteFile(pipe, &addr, sizeof(addr), &len, NULL)
-        || !ReadFile(pipe, &ack, sizeof(ack), &len, NULL))
+    if (!send_msg_iservice(pipe, &addr, sizeof(addr), &ack, "TUN"))
     {
-        msg(M_WARN, "TUN: could not talk to service: %s [%lu]",
-            strerror_win32(GetLastError(), &gc), GetLastError());
         goto out;
     }
 
@@ -141,7 +137,6 @@ out:
 static bool
 do_dns6_service(bool add, const struct tuntap *tt)
 {
-    DWORD len;
     bool ret = false;
     ack_message_t ack;
     struct gc_arena gc = gc_new();
@@ -185,11 +180,8 @@ do_dns6_service(bool add, const struct tuntap *tt)
     msg(D_LOW, "%s IPv6 dns servers on '%s' (if_index = %d) using service",
         (add ? "Setting" : "Deleting"), dns.iface.name, dns.iface.index);
 
-    if (!WriteFile(pipe, &dns, sizeof(dns), &len, NULL)
-        || !ReadFile(pipe, &ack, sizeof(ack), &len, NULL))
+    if (!send_msg_iservice(pipe, &dns, sizeof(dns), &ack, "TUN"))
     {
-        msg(M_WARN, "TUN: could not talk to service: %s [%lu]",
-            strerror_win32(GetLastError(), &gc), GetLastError());
         goto out;
     }
 
@@ -561,8 +553,8 @@ is_tun_p2p(const struct tuntap *tt)
     bool tun = false;
 
     if (tt->type == DEV_TYPE_TAP
-          || (tt->type == DEV_TYPE_TUN && tt->topology == TOP_SUBNET)
-          || tt->type == DEV_TYPE_NULL )
+        || (tt->type == DEV_TYPE_TUN && tt->topology == TOP_SUBNET)
+        || tt->type == DEV_TYPE_NULL)
     {
         tun = false;
     }
@@ -901,7 +893,7 @@ do_ifconfig_ipv6(struct tuntap *tt, const char *ifname, int tun_mtu,
                 ifconfig_ipv6_local, tt->netbits_ipv6, ifname);
     argv_msg(M_INFO, &argv);
     openvpn_execve_check(&argv, es, S_FATAL, "Linux ip -6 addr add failed");
-#else
+#else  /* ifdef ENABLE_IPROUTE */
     argv_printf(&argv, "%s %s add %s/%d mtu %d up", IFCONFIG_PATH, ifname,
                 ifconfig_ipv6_local, tt->netbits_ipv6, tun_mtu);
     argv_msg(M_INFO, &argv);
@@ -1395,6 +1387,7 @@ do_ifconfig_ipv4(struct tuntap *tt, const char *ifname, int tun_mtu,
                     ifname, ifconfig_local,
                     print_in_addr_t(tt->adapter_netmask, 0, &gc));
                 break;
+
             case IPW32_SET_NETSH:
                 netsh_ifconfig(&tt->options, ifname, tt->local,
                                tt->adapter_netmask, NI_IP_NETMASK|NI_OPTIONS);
@@ -2450,7 +2443,7 @@ close_tun(struct tuntap *tt)
     struct argv argv = argv_new();
 
     /* setup command, close tun dev (clears tt->actual_name!), run command
-    */
+     */
 
     argv_printf(&argv, "%s %s destroy",
                 IFCONFIG_PATH, tt->actual_name);
@@ -2536,7 +2529,7 @@ close_tun(struct tuntap *tt)
     struct argv argv = argv_new();
 
     /* setup command, close tun dev (clears tt->actual_name!), run command
-    */
+     */
 
     argv_printf(&argv, "%s %s destroy",
                 IFCONFIG_PATH, tt->actual_name);
@@ -2676,7 +2669,7 @@ close_tun(struct tuntap *tt)
     struct argv argv = argv_new();
 
     /* setup command, close tun dev (clears tt->actual_name!), run command
-    */
+     */
 
     argv_printf(&argv, "%s %s destroy",
                 IFCONFIG_PATH, tt->actual_name);
@@ -4480,8 +4473,7 @@ get_adapter_index_method_1(const char *guid)
     DWORD index;
     ULONG aindex;
     wchar_t wbuf[256];
-    swprintf(wbuf, SIZE(wbuf), L"\\DEVICE\\TCPIP_%S", guid);
-    wbuf [SIZE(wbuf) - 1] = 0;
+    openvpn_swprintf(wbuf, SIZE(wbuf), L"\\DEVICE\\TCPIP_%S", guid);
     if (GetAdapterIndex(wbuf, &aindex) != NO_ERROR)
     {
         index = TUN_ADAPTER_INDEX_INVALID;
@@ -5203,6 +5195,46 @@ netsh_enable_dhcp(const struct tuntap_options *to,
     argv_reset(&argv);
 }
 
+/* Enable dhcp on tap adapter using iservice */
+static bool
+service_enable_dhcp(const struct tuntap *tt)
+{
+    DWORD len;
+    bool ret = false;
+    ack_message_t ack;
+    struct gc_arena gc = gc_new();
+    HANDLE pipe = tt->options.msg_channel;
+
+    enable_dhcp_message_t dhcp = {
+        .header = {
+            msg_enable_dhcp,
+            sizeof(enable_dhcp_message_t),
+            0
+        },
+        .iface = { .index = tt->adapter_index, .name = "" }
+    };
+
+    if (!send_msg_iservice(pipe, &dhcp, sizeof(dhcp), &ack, "Enable_dhcp"))
+    {
+        goto out;
+    }
+
+    if (ack.error_number != NO_ERROR)
+    {
+        msg(M_NONFATAL, "TUN: enabling dhcp using service failed: %s [status=%u if_index=%d]",
+            strerror_win32(ack.error_number, &gc), ack.error_number, dhcp.iface.index);
+    }
+    else
+    {
+        msg(M_INFO, "DHCP enabled on interface %d using service", dhcp.iface.index);
+        ret = true;
+    }
+
+out:
+    gc_free(&gc);
+    return ret;
+}
+
 /*
  * Return a TAP name for netsh commands.
  */
@@ -5418,18 +5450,16 @@ fork_dhcp_action(struct tuntap *tt)
 static void
 register_dns_service(const struct tuntap *tt)
 {
-    DWORD len;
     HANDLE msg_channel = tt->options.msg_channel;
     ack_message_t ack;
     struct gc_arena gc = gc_new();
 
     message_header_t rdns = { msg_register_dns, sizeof(message_header_t), 0 };
 
-    if (!WriteFile(msg_channel, &rdns, sizeof(rdns), &len, NULL)
-        || !ReadFile(msg_channel, &ack, sizeof(ack), &len, NULL))
+    if (!send_msg_iservice(msg_channel, &rdns, sizeof(rdns), &ack, "Register_dns"))
     {
-        msg(M_WARN, "Register_dns: could not talk to service: %s [status=0x%lx]",
-            strerror_win32(GetLastError(), &gc), GetLastError());
+        gc_free(&gc);
+        return;
     }
 
     else if (ack.error_number != NO_ERROR)
@@ -5683,7 +5713,15 @@ open_tun(const char *dev, const char *dev_type, const char *dev_node, struct tun
              */
             if (dhcp_status(tt->adapter_index) == DHCP_STATUS_DISABLED)
             {
-                netsh_enable_dhcp(&tt->options, tt->actual_name);
+                /* try using the service if available, else directly execute netsh */
+                if (tt->options.msg_channel)
+                {
+                    service_enable_dhcp(tt);
+                }
+                else
+                {
+                    netsh_enable_dhcp(&tt->options, tt->actual_name);
+                }
             }
             dhcp_masq = true;
             dhcp_masq_post = true;
@@ -5885,14 +5923,11 @@ open_tun(const char *dev, const char *dev_type, const char *dev_node, struct tun
                     .iface = { .index = index, .name = "" }
                 };
 
-                if (!WriteFile(tt->options.msg_channel, &msg, sizeof(msg), &len, NULL)
-                    || !ReadFile(tt->options.msg_channel, &ack, sizeof(ack), &len, NULL))
+                if (send_msg_iservice(tt->options.msg_channel, &msg, sizeof(msg),
+                                      &ack, "TUN"))
                 {
-                    msg(M_WARN, "TUN: could not talk to service: %s [%lu]",
-                        strerror_win32(GetLastError(), &gc), GetLastError());
+                    status = ack.error_number;
                 }
-
-                status = ack.error_number;
             }
             else
             {

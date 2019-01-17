@@ -114,7 +114,8 @@ cleanup:
 }
 
 #ifdef ENABLE_X509ALTUSERNAME
-bool x509_username_field_ext_supported(const char *fieldname)
+bool
+x509_username_field_ext_supported(const char *fieldname)
 {
     int nid = OBJ_txt2nid(fieldname);
     return nid == NID_subject_alt_name || nid == NID_issuer_alt_name;
@@ -331,18 +332,6 @@ x509_get_subject(X509 *cert, struct gc_arena *gc)
     BIO *subject_bio = NULL;
     BUF_MEM *subject_mem;
     char *subject = NULL;
-
-    /*
-     * Generate the subject string in OpenSSL proprietary format,
-     * when in --compat-names mode
-     */
-    if (compat_flag(COMPAT_FLAG_QUERY | COMPAT_NAMES))
-    {
-        subject = gc_malloc(256, false, gc);
-        X509_NAME_oneline(X509_get_subject_name(cert), subject, 256);
-        subject[255] = '\0';
-        return subject;
-    }
 
     subject_bio = BIO_new(BIO_s_mem());
     if (subject_bio == NULL)
@@ -599,7 +588,7 @@ x509_verify_ns_cert_type(openvpn_x509_cert_t *peer_cert, const int usage)
          * prevent it to take a const argument
          */
         result_t result = X509_check_purpose(peer_cert, X509_PURPOSE_SSL_CLIENT, 0) ?
-	       SUCCESS : FAILURE;
+                          SUCCESS : FAILURE;
 
         /*
          * old versions of OpenSSL allow us to make the less strict check we used to
@@ -627,7 +616,7 @@ x509_verify_ns_cert_type(openvpn_x509_cert_t *peer_cert, const int usage)
          * prevent it to take a const argument
          */
         result_t result = X509_check_purpose(peer_cert, X509_PURPOSE_SSL_SERVER, 0) ?
-	       SUCCESS : FAILURE;
+                          SUCCESS : FAILURE;
 
         /*
          * old versions of OpenSSL allow us to make the less strict check we used to

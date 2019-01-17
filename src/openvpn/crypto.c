@@ -700,7 +700,7 @@ crypto_adjust_frame_parameters(struct frame *frame,
                                bool packet_id,
                                bool packet_id_long_form)
 {
-    size_t crypto_overhead = 0;
+    unsigned int crypto_overhead = 0;
 
     if (packet_id)
     {
@@ -725,10 +725,10 @@ crypto_adjust_frame_parameters(struct frame *frame,
     frame_add_to_extra_frame(frame, crypto_overhead);
 
     msg(D_MTU_DEBUG, "%s: Adjusting frame parameters for crypto by %u bytes",
-        __func__, (unsigned int) crypto_overhead);
+        __func__, crypto_overhead);
 }
 
-size_t
+unsigned int
 crypto_max_overhead(void)
 {
     return packet_id_size(true) + OPENVPN_MAX_IV_LENGTH
@@ -841,7 +841,7 @@ init_key_ctx(struct key_ctx *ctx, const struct key *key,
         dmsg(D_CRYPTO_DEBUG, "%s: CIPHER block_size=%d iv_size=%d",
              prefix, cipher_kt_block_size(kt->cipher),
              cipher_kt_iv_size(kt->cipher));
-        if (cipher_kt_block_size(kt->cipher) < 128/8)
+        if (cipher_kt_insecure(kt->cipher))
         {
             msg(M_WARN, "WARNING: INSECURE cipher with block size less than 128"
                 " bit (%d bit).  This allows attacks like SWEET32.  Mitigate by "
@@ -920,10 +920,12 @@ key_is_zero(struct key *key, const struct key_type *kt)
 {
     int i;
     for (i = 0; i < kt->cipher_length; ++i)
+    {
         if (key->cipher[i])
         {
             return false;
         }
+    }
     msg(D_CRYPT_ERRORS, "CRYPTO INFO: WARNING: zero key detected");
     return true;
 }
@@ -1270,7 +1272,9 @@ read_key_file(struct key2 *key2, const char *file, const unsigned int flags)
     {
         in = buffer_read_from_file(file, &gc);
         if (!buf_valid(&in))
+        {
             msg(M_FATAL, "Read error on key file ('%s')", file);
+        }
 
         size = in.len;
     }
@@ -1462,7 +1466,7 @@ write_key_file(const int nkeys, const char *filename)
     buf_printf(&out, "%s\n", static_key_foot);
 
     /* write key file, now formatted in out, to file */
-    if(!buffer_write_file(filename, &out))
+    if (!buffer_write_file(filename, &out))
     {
         nbits = -1;
     }
@@ -1692,7 +1696,9 @@ prng_reset_nonce(void)
     {
         int i;
         for (i = 0; i < size; ++i)
+        {
             nonce_data[i] = (uint8_t) i;
+        }
     }
 #endif
 }
@@ -1769,6 +1775,33 @@ get_random(void)
     return l;
 }
 
+void
+print_cipher(const cipher_kt_t *cipher)
+{
+    const char *var_key_size = cipher_kt_var_key_size(cipher) ?
+                               " by default" : "";
+
+    printf("%s  (%d bit key%s, ",
+           translate_cipher_name_to_openvpn(cipher_kt_name(cipher)),
+           cipher_kt_key_size(cipher) * 8, var_key_size);
+
+    if (cipher_kt_block_size(cipher) == 1)
+    {
+        printf("stream cipher");
+    }
+    else
+    {
+        printf("%d bit block", cipher_kt_block_size(cipher) * 8);
+    }
+
+    if (!cipher_kt_mode_cbc(cipher))
+    {
+        printf(", TLS client/server mode only");
+    }
+
+    printf(")\n");
+}
+
 static const cipher_name_pair *
 get_cipher_name_pair(const char *cipher_name)
 {
@@ -1814,4 +1847,38 @@ translate_cipher_name_to_openvpn(const char *cipher_name)
     }
 
     return pair->openvpn_name;
+}
+
+void
+write_pem_key_file(const char *filename, const char *pem_name)
+{
+    struct gc_arena gc = gc_new();
+    struct key server_key = { 0 };
+    struct buffer server_key_buf = clear_buf();
+    struct buffer server_key_pem = clear_buf();
+
+    if (!rand_bytes((void *)&server_key, sizeof(server_key)))
+    {
+        msg(M_NONFATAL, "ERROR: could not generate random key");
+        goto cleanup;
+    }
+    buf_set_read(&server_key_buf, (void *)&server_key, sizeof(server_key));
+    if (!crypto_pem_encode(pem_name, &server_key_pem,
+                           &server_key_buf, &gc))
+    {
+        msg(M_WARN, "ERROR: could not PEM-encode key");
+        goto cleanup;
+    }
+
+    if (!buffer_write_file(filename, &server_key_pem))
+    {
+        msg(M_ERR, "ERROR: could not write key file");
+        goto cleanup;
+    }
+
+cleanup:
+    secure_memzero(&server_key, sizeof(server_key));
+    buf_clear(&server_key_pem);
+    gc_free(&gc);
+    return;
 }

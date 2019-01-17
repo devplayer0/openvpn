@@ -169,13 +169,24 @@ bool tls_ctx_initialised(struct tls_root_ctx *ctx);
 bool tls_ctx_set_options(struct tls_root_ctx *ctx, unsigned int ssl_flags);
 
 /**
- * Restrict the list of ciphers that can be used within the TLS context.
+ * Restrict the list of ciphers that can be used within the TLS context for TLS 1.2
+ * and below
  *
  * @param ctx           TLS context to restrict, must be valid.
  * @param ciphers       String containing : delimited cipher names, or NULL to use
  *                                      sane defaults.
  */
 void tls_ctx_restrict_ciphers(struct tls_root_ctx *ctx, const char *ciphers);
+
+/**
+ * Restrict the list of ciphers that can be used within the TLS context for TLS 1.3
+ * and higher
+ *
+ * @param ctx           TLS context to restrict, must be valid.
+ * @param ciphers       String containing : delimited cipher names, or NULL to use
+ *                                      sane defaults.
+ */
+void tls_ctx_restrict_ciphers_tls13(struct tls_root_ctx *ctx, const char *ciphers);
 
 /**
  * Set the TLS certificate profile.  The profile defines which crypto
@@ -270,28 +281,21 @@ void tls_ctx_load_cert_file(struct tls_root_ctx *ctx, const char *cert_file,
  *                              successful.
  */
 int tls_ctx_load_priv_file(struct tls_root_ctx *ctx, const char *priv_key_file,
-                           const char *priv_key_file_inline
-                           );
+                           const char *priv_key_file_inline);
 
-#ifdef MANAGMENT_EXTERNAL_KEY
+#ifdef ENABLE_MANAGEMENT
 
 /**
  * Tell the management interface to load the given certificate and the external
  * private key matching the given certificate.
  *
  * @param ctx                   TLS context to use
- * @param cert_file             The file name to load the certificate from, or
- *                              "[[INLINE]]" in the case of inline files.
- * @param cert_file_inline      A string containing the certificate
  *
- * @return                      1 if an error occurred, 0 if parsing was
- *                              successful.
+ * @return                      1 if an error occurred, 0 if successful.
  */
-int tls_ctx_use_external_private_key(struct tls_root_ctx *ctx,
-                                     const char *cert_file, const char *cert_file_inline);
+int tls_ctx_use_management_external_key(struct tls_root_ctx *ctx);
 
-#endif
-
+#endif /* ENABLE_MANAGEMENT */
 
 /**
  * Load certificate authority certificates from the given file or path.
@@ -513,15 +517,19 @@ int key_state_read_plaintext(struct key_state_ssl *ks_ssl, struct buffer *buf,
 void print_details(struct key_state_ssl *ks_ssl, const char *prefix);
 
 /*
- * Show the TLS ciphers that are available for us to use in the OpenSSL
- * library.
+ * Show the TLS ciphers that are available for us to use in the
+ * library depending on the TLS version. This function prints
+ * a list of ciphers without headers/footers.
  *
  * @param cipher_list       list of allowed TLS cipher, or NULL.
  * @param tls_cert_profile  TLS certificate crypto profile name.
+ * @param tls13             Select if <=TLS1.2 or TLS1.3+ ciphers
+ *                          should be shown
  */
 void
-show_available_tls_ciphers(const char *cipher_list,
-                           const char *tls_cert_profile);
+show_available_tls_ciphers_list(const char *cipher_list,
+                                const char *tls_cert_profile,
+                                bool tls13);
 
 /*
  * Show the available elliptic curves in the crypto library

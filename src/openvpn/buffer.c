@@ -37,6 +37,8 @@
 
 #include "memdbg.h"
 
+#include <wchar.h>
+
 size_t
 array_mult_safe(const size_t m1, const size_t m2, const size_t extra)
 {
@@ -309,6 +311,29 @@ openvpn_snprintf(char *str, size_t size, const char *format, ...)
 }
 
 /*
+ * openvpn_swprintf() is currently only used by Windows code paths
+ * and when enabled for all platforms it will currently break older
+ * OpenBSD versions lacking vswprintf(3) support in their libc.
+ */
+
+#ifdef _WIN32
+bool
+openvpn_swprintf(wchar_t *const str, const size_t size, const wchar_t *const format, ...)
+{
+    va_list arglist;
+    int len = -1;
+    if (size > 0)
+    {
+        va_start(arglist, format);
+        len = vswprintf(str, size, format, arglist);
+        va_end(arglist);
+        str[size - 1] = L'\0';
+    }
+    return (len >= 0 && len < size);
+}
+#endif
+
+/*
  * write a string to the end of a buffer that was
  * truncated by buf_printf
  */
@@ -449,7 +474,7 @@ x_gc_freespecial(struct gc_arena *a)
 }
 
 void
-gc_addspecial(void *addr, void(free_function)(void *), struct gc_arena *a)
+gc_addspecial(void *addr, void (free_function)(void *), struct gc_arena *a)
 {
     ASSERT(a);
     struct gc_entry_special *e;
@@ -1271,49 +1296,44 @@ void
 buffer_list_aggregate_separator(struct buffer_list *bl, const size_t max_len,
                                 const char *sep)
 {
-    int sep_len = strlen(sep);
-
-    if (bl->head)
+    const int sep_len = strlen(sep);
+    struct buffer_entry *more = bl->head;
+    size_t size = 0;
+    int count = 0;
+    for (count = 0; more; ++count)
     {
-        struct buffer_entry *more = bl->head;
-        size_t size = 0;
-        int count = 0;
-        for (count = 0; more; ++count)
+        size_t extra_len = BLEN(&more->buf) + sep_len;
+        if (size + extra_len > max_len)
         {
-            size_t extra_len = BLEN(&more->buf) + sep_len;
-            if (size + extra_len > max_len)
-            {
-                break;
-            }
-
-            size += extra_len;
-            more = more->next;
+            break;
         }
 
-        if (count >= 2)
-        {
-            int i;
-            struct buffer_entry *e = bl->head, *f;
+        size += extra_len;
+        more = more->next;
+    }
 
-            ALLOC_OBJ_CLEAR(f, struct buffer_entry);
-            f->buf = alloc_buf(size + 1); /* prevent 0-byte malloc */
-            f->buf.capacity = size;
-            for (i = 0; e && i < count; ++i)
-            {
-                struct buffer_entry *next = e->next;
-                buf_copy(&f->buf, &e->buf);
-                buf_write(&f->buf, sep, sep_len);
-                free_buf(&e->buf);
-                free(e);
-                e = next;
-            }
-            bl->head = f;
-            bl->size -= count - 1;
-            f->next = more;
-            if (!more)
-            {
-                bl->tail = f;
-            }
+    if (count >= 2)
+    {
+        struct buffer_entry *f;
+        ALLOC_OBJ_CLEAR(f, struct buffer_entry);
+        f->buf = alloc_buf(size + 1); /* prevent 0-byte malloc */
+
+        struct buffer_entry *e = bl->head;
+        for (size_t i = 0; e && i < count; ++i)
+        {
+            struct buffer_entry *next = e->next;
+            buf_copy(&f->buf, &e->buf);
+            buf_write(&f->buf, sep, sep_len);
+            free_buf(&e->buf);
+            free(e);
+            e = next;
+        }
+        bl->head = f;
+        bl->size -= count - 1;
+        f->next = more;
+        if (!more)
+        {
+            bl->tail = f;
         }
     }
 }

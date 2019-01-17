@@ -294,7 +294,7 @@ tls_get_cipher_name_pair(const char *cipher_name, size_t len)
 static void
 tls_limit_reneg_bytes(const cipher_kt_t *cipher, int *reneg_bytes)
 {
-    if (cipher && (cipher_kt_block_size(cipher) < 128/8))
+    if (cipher && cipher_kt_insecure(cipher))
     {
         if (*reneg_bytes == -1) /* Not user-specified */
         {
@@ -398,8 +398,9 @@ pem_password_callback(char *buf, int size, int rwflag, void *u)
 
 static bool auth_user_pass_enabled;     /* GLOBAL */
 static struct user_pass auth_user_pass; /* GLOBAL */
+static struct user_pass auth_token;     /* GLOBAL */
 
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
 static char *auth_challenge; /* GLOBAL */
 #endif
 
@@ -407,12 +408,9 @@ void
 auth_user_pass_setup(const char *auth_file, const struct static_challenge_info *sci)
 {
     auth_user_pass_enabled = true;
-    if (!auth_user_pass.defined)
+    if (!auth_user_pass.defined && !auth_token.defined)
     {
-#if AUTO_USERID
-        get_user_pass_auto_userid(&auth_user_pass, auth_file);
-#else
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
         if (auth_challenge) /* dynamic challenge/response */
         {
             get_user_pass_cr(&auth_user_pass,
@@ -435,9 +433,8 @@ auth_user_pass_setup(const char *auth_file, const struct static_challenge_info *
                              sci->challenge_text);
         }
         else
-#endif /* ifdef ENABLE_CLIENT_CR */
+#endif /* ifdef ENABLE_MANAGEMENT */
         get_user_pass(&auth_user_pass, auth_file, UP_TYPE_AUTH, GET_USER_PASS_MANAGEMENT);
-#endif /* if AUTO_USERID */
     }
 }
 
@@ -449,7 +446,7 @@ ssl_set_auth_nocache(void)
 {
     passbuf.nocache = true;
     auth_user_pass.nocache = true;
-    /* wait for push-reply, because auth-token may invert nocache */
+    /* wait for push-reply, because auth-token may still need the username */
     auth_user_pass.wait_for_push = true;
 }
 
@@ -459,15 +456,18 @@ ssl_set_auth_nocache(void)
 void
 ssl_set_auth_token(const char *token)
 {
-    if (auth_user_pass.nocache)
-    {
-        msg(M_INFO,
-            "auth-token received, disabling auth-nocache for the "
-            "authentication token");
-        auth_user_pass.nocache = false;
-    }
+    set_auth_token(&auth_user_pass, &auth_token, token);
+}
 
-    set_auth_token(&auth_user_pass, token);
+/*
+ * Cleans an auth token and checks if it was active
+ */
+bool
+ssl_clean_auth_token (void)
+{
+    bool wasdefined = auth_token.defined;
+    purge_user_pass(&auth_token, true);
+    return wasdefined;
 }
 
 /*
@@ -484,12 +484,12 @@ ssl_purge_auth(const bool auth_user_pass_only)
         purge_user_pass(&passbuf, true);
     }
     purge_user_pass(&auth_user_pass, true);
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
     ssl_purge_auth_challenge();
 #endif
 }
 
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
 
 void
 ssl_purge_auth_challenge(void)
@@ -622,9 +622,10 @@ init_ssl(const struct options *options, struct tls_root_ctx *new_ctx)
     tls_ctx_set_cert_profile(new_ctx, options->tls_cert_profile);
 
     /* Allowable ciphers */
-    /* Since @SECLEVEL also influces loading of certificates, set the
+    /* Since @SECLEVEL also influences loading of certificates, set the
      * cipher restrictions before loading certificates */
     tls_ctx_restrict_ciphers(new_ctx, options->cipher_list);
+    tls_ctx_restrict_ciphers_tls13(new_ctx, options->cipher_list_tls13);
 
     if (!tls_ctx_set_options(new_ctx, options->ssl_flags))
     {
@@ -656,42 +657,38 @@ init_ssl(const struct options *options, struct tls_root_ctx *new_ctx)
         tls_ctx_load_cryptoapi(new_ctx, options->cryptoapi_cert);
     }
 #endif
-#ifdef MANAGMENT_EXTERNAL_KEY
-    else if ((options->management_flags & MF_EXTERNAL_KEY)
-             && (options->cert_file || options->management_flags & MF_EXTERNAL_CERT))
+#ifdef ENABLE_MANAGEMENT
+    else if (options->management_flags & MF_EXTERNAL_CERT)
     {
-        if (options->cert_file)
+        char *cert = management_query_cert(management,
+                                           options->management_certificate);
+        tls_ctx_load_cert_file(new_ctx, INLINE_FILE_TAG, cert);
+        free(cert);
+    }
+#endif
+    else if (options->cert_file)
+    {
+        tls_ctx_load_cert_file(new_ctx, options->cert_file, options->cert_file_inline);
+    }
+
+    if (options->priv_key_file)
+    {
+        if (0 != tls_ctx_load_priv_file(new_ctx, options->priv_key_file,
+                                        options->priv_key_file_inline))
         {
-            tls_ctx_use_external_private_key(new_ctx, options->cert_file,
-                                             options->cert_file_inline);
+            goto err;
         }
-        else
+    }
+#ifdef ENABLE_MANAGEMENT
+    else if (options->management_flags & MF_EXTERNAL_KEY)
+    {
+        if (tls_ctx_use_management_external_key(new_ctx))
         {
-            char *external_certificate = management_query_cert(management,
-                                                               options->management_certificate);
-            tls_ctx_use_external_private_key(new_ctx, INLINE_FILE_TAG,
-                                             external_certificate);
-            free(external_certificate);
+            msg(M_WARN, "Cannot initialize mamagement-external-key");
+            goto err;
         }
     }
 #endif
-    else
-    {
-        /* Load Certificate */
-        if (options->cert_file)
-        {
-            tls_ctx_load_cert_file(new_ctx, options->cert_file, options->cert_file_inline);
-        }
-
-        /* Load Private Key */
-        if (options->priv_key_file)
-        {
-            if (0 != tls_ctx_load_priv_file(new_ctx, options->priv_key_file, options->priv_key_file_inline))
-            {
-                goto err;
-            }
-        }
-    }
 
     if (options->ca_file || options->ca_path)
     {
@@ -792,6 +789,9 @@ packet_opcode_name(int op)
         case P_CONTROL_HARD_RESET_SERVER_V2:
             return "P_CONTROL_HARD_RESET_SERVER_V2";
 
+        case P_CONTROL_HARD_RESET_CLIENT_V3:
+            return "P_CONTROL_HARD_RESET_CLIENT_V3";
+
         case P_CONTROL_SOFT_RESET_V1:
             return "P_CONTROL_SOFT_RESET_V1";
 
@@ -864,7 +864,8 @@ is_hard_reset(int op, int key_method)
 
     if (!key_method || key_method >= 2)
     {
-        if (op == P_CONTROL_HARD_RESET_CLIENT_V2 || op == P_CONTROL_HARD_RESET_SERVER_V2)
+        if (op == P_CONTROL_HARD_RESET_CLIENT_V2 || op == P_CONTROL_HARD_RESET_SERVER_V2
+            || op == P_CONTROL_HARD_RESET_CLIENT_V3)
         {
             return true;
         }
@@ -1095,8 +1096,15 @@ tls_session_init(struct tls_multi *multi, struct tls_session *session)
     }
     else /* session->opt->key_method >= 2 */
     {
-        session->initial_opcode = session->opt->server ?
-                                  P_CONTROL_HARD_RESET_SERVER_V2 : P_CONTROL_HARD_RESET_CLIENT_V2;
+        if (session->opt->server)
+        {
+            session->initial_opcode = P_CONTROL_HARD_RESET_SERVER_V2;
+        }
+        else
+        {
+            session->initial_opcode = session->opt->tls_crypt_v2 ?
+                                      P_CONTROL_HARD_RESET_CLIENT_V3 : P_CONTROL_HARD_RESET_CLIENT_V2;
+        }
     }
 
     /* Initialize control channel authentication parameters */
@@ -1136,16 +1144,9 @@ tls_session_init(struct tls_multi *multi, struct tls_session *session)
 static void
 tls_session_free(struct tls_session *session, bool clear)
 {
-    int i;
+    tls_wrap_free(&session->tls_wrap);
 
-    if (packet_id_initialized(&session->tls_wrap.opt.packet_id))
-    {
-        packet_id_free(&session->tls_wrap.opt.packet_id);
-    }
-
-    free_buf(&session->tls_wrap.work);
-
-    for (i = 0; i < KS_SIZE; ++i)
+    for (size_t i = 0; i < KS_SIZE; ++i)
     {
         key_state_free(&session->key[i], false);
     }
@@ -1471,6 +1472,8 @@ write_control_auth(struct tls_session *session,
     ASSERT(reliable_ack_write
                (ks->rec_ack, buf, &ks->session_id_remote, max_ack, prepend_ack));
 
+    msg(D_TLS_DEBUG, "%s(): %s", __func__, packet_opcode_name(opcode));
+
     if (session->tls_wrap.mode == TLS_WRAP_AUTH
         || session->tls_wrap.mode == TLS_WRAP_NONE)
     {
@@ -1488,17 +1491,26 @@ write_control_auth(struct tls_session *session,
         ASSERT(buf_init(&session->tls_wrap.work, buf->offset));
         ASSERT(buf_write(&session->tls_wrap.work, &header, sizeof(header)));
         ASSERT(session_id_write(&session->session_id, &session->tls_wrap.work));
-        if (tls_crypt_wrap(buf, &session->tls_wrap.work, &session->tls_wrap.opt))
-        {
-            /* Don't change the original data in buf, it's used by the reliability
-             * layer to resend on failure. */
-            *buf = session->tls_wrap.work;
-        }
-        else
+        if (!tls_crypt_wrap(buf, &session->tls_wrap.work, &session->tls_wrap.opt))
         {
             buf->len = 0;
             return;
         }
+
+        if (opcode == P_CONTROL_HARD_RESET_CLIENT_V3)
+        {
+            if (!buf_copy(&session->tls_wrap.work,
+                          session->tls_wrap.tls_crypt_v2_wkc))
+            {
+                msg(D_TLS_ERRORS, "Could not append tls-crypt-v2 client key");
+                buf->len = 0;
+                return;
+            }
+        }
+
+        /* Don't change the original data in buf, it's used by the reliability
+         * layer to resend on failure. */
+        *buf = session->tls_wrap.work;
     }
     *to_link_addr = &ks->remote_addr;
 }
@@ -1509,10 +1521,21 @@ write_control_auth(struct tls_session *session,
 static bool
 read_control_auth(struct buffer *buf,
                   struct tls_wrap_ctx *ctx,
-                  const struct link_socket_actual *from)
+                  const struct link_socket_actual *from,
+                  const struct tls_options *opt)
 {
     struct gc_arena gc = gc_new();
     bool ret = false;
+
+    const uint8_t opcode = *(BPTR(buf)) >> P_OPCODE_SHIFT;
+    if (opcode == P_CONTROL_HARD_RESET_CLIENT_V3
+        && !tls_crypt_v2_extract_client_key(buf, ctx, opt))
+    {
+        msg(D_TLS_ERRORS,
+            "TLS Error: can not extract tls-crypt-v2 client key from %s",
+            print_link_socket_actual(from, &gc));
+        goto cleanup;
+    }
 
     if (ctx->mode == TLS_WRAP_AUTH)
     {
@@ -1552,6 +1575,18 @@ read_control_auth(struct buffer *buf,
         ASSERT(buf_init(buf, buf->offset));
         ASSERT(buf_copy(buf, &tmp));
         buf_clear(&tmp);
+    }
+    else if (ctx->tls_crypt_v2_server_key.cipher)
+    {
+        /* If tls-crypt-v2 is enabled, require *some* wrapping */
+        msg(D_TLS_ERRORS, "TLS Error: could not determine wrapping from %s",
+            print_link_socket_actual(from, &gc));
+        /* TODO Do we want to support using tls-crypt-v2 and no control channel
+         * wrapping at all simultaneously?  That would allow server admins to
+         * upgrade clients one-by-one without running a second instance, but we
+         * should not enable it by default because it breaks DoS-protection.
+         * So, add something like --tls-crypt-v2-allow-insecure-fallback ? */
+        goto cleanup;
     }
 
     if (ctx->mode == TLS_WRAP_NONE || ctx->mode == TLS_WRAP_AUTH)
@@ -1991,7 +2026,7 @@ tls_session_update_crypto_params(struct tls_session *session,
     }
 
     /* Update frame parameters: undo worst-case overhead, add actual overhead */
-    frame_add_to_extra_frame(frame, -(crypto_max_overhead()));
+    frame_remove_from_extra_frame(frame, crypto_max_overhead());
     crypto_adjust_frame_parameters(frame, &session->opt->key_type,
                                    options->replay, packet_id_long_form);
     frame_finalize(frame, options->ce.link_mtu_defined, options->ce.link_mtu,
@@ -2372,24 +2407,31 @@ key_method_2_write(struct buffer *buf, struct tls_session *session)
     /* write username/password if specified */
     if (auth_user_pass_enabled)
     {
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
         auth_user_pass_setup(session->opt->auth_user_pass_file, session->opt->sci);
 #else
         auth_user_pass_setup(session->opt->auth_user_pass_file, NULL);
 #endif
-        if (!write_string(buf, auth_user_pass.username, -1))
+        struct user_pass *up = &auth_user_pass;
+
+        /*
+         * If we have a valid auth-token, send that instead of real
+         * username/password
+         */
+        if (auth_token.defined)
+            up = &auth_token;
+
+        if (!write_string(buf, up->username, -1))
         {
             goto error;
         }
-        if (!write_string(buf, auth_user_pass.password, -1))
+        else if (!write_string(buf, up->password, -1))
         {
             goto error;
         }
         /* if auth-nocache was specified, the auth_user_pass object reaches
          * a "complete" state only after having received the push-reply
          * message.
-         * This is the case because auth-token statement in a push-reply would
-         * invert its nocache.
          *
          * For this reason, skip the purge operation here if no push-reply
          * message has been received yet.
@@ -3427,7 +3469,8 @@ tls_pre_decrypt(struct tls_multi *multi,
             {
                 /* verify client -> server or server -> client connection */
                 if (((op == P_CONTROL_HARD_RESET_CLIENT_V1
-                      || op == P_CONTROL_HARD_RESET_CLIENT_V2) && !multi->opt.server)
+                      || op == P_CONTROL_HARD_RESET_CLIENT_V2
+                      || op == P_CONTROL_HARD_RESET_CLIENT_V3) && !multi->opt.server)
                     || ((op == P_CONTROL_HARD_RESET_SERVER_V1
                          || op == P_CONTROL_HARD_RESET_SERVER_V2) && multi->opt.server))
                 {
@@ -3574,7 +3617,8 @@ tls_pre_decrypt(struct tls_multi *multi,
                     goto error;
                 }
 
-                if (!read_control_auth(buf, &session->tls_wrap, from))
+                if (!read_control_auth(buf, &session->tls_wrap, from,
+                                       session->opt))
                 {
                     goto error;
                 }
@@ -3627,7 +3671,8 @@ tls_pre_decrypt(struct tls_multi *multi,
                 if (op == P_CONTROL_SOFT_RESET_V1
                     && DECRYPT_KEY_ENABLED(multi, ks))
                 {
-                    if (!read_control_auth(buf, &session->tls_wrap, from))
+                    if (!read_control_auth(buf, &session->tls_wrap, from,
+                                           session->opt))
                     {
                         goto error;
                     }
@@ -3648,7 +3693,8 @@ tls_pre_decrypt(struct tls_multi *multi,
                         do_burst = true;
                     }
 
-                    if (!read_control_auth(buf, &session->tls_wrap, from))
+                    if (!read_control_auth(buf, &session->tls_wrap, from,
+                                           session->opt))
                     {
                         goto error;
                     }
@@ -3746,7 +3792,7 @@ tls_pre_decrypt(struct tls_multi *multi,
                                 /* Save incoming ciphertext packet to reliable buffer */
                                 struct buffer *in = reliable_get_buf(ks->rec_reliable);
                                 ASSERT(in);
-                                if(!buf_copy(in, buf))
+                                if (!buf_copy(in, buf))
                                 {
                                     msg(D_MULTI_DROPPED,
                                         "Incoming control channel packet too big, dropping.");
@@ -3812,7 +3858,8 @@ tls_pre_decrypt_lite(const struct tls_auth_standalone *tas,
         /* this packet is from an as-yet untrusted source, so
          * scrutinize carefully */
 
-        if (op != P_CONTROL_HARD_RESET_CLIENT_V2)
+        if (op != P_CONTROL_HARD_RESET_CLIENT_V2
+            && op != P_CONTROL_HARD_RESET_CLIENT_V3)
         {
             /*
              * This can occur due to bogus data or DoS packets.
@@ -3849,8 +3896,13 @@ tls_pre_decrypt_lite(const struct tls_auth_standalone *tas,
             bool status;
 
             /* HMAC test, if --tls-auth was specified */
-            status = read_control_auth(&newbuf, &tls_wrap_tmp, from);
+            status = read_control_auth(&newbuf, &tls_wrap_tmp, from, NULL);
             free_buf(&newbuf);
+            free_buf(&tls_wrap_tmp.tls_crypt_v2_metadata);
+            if (tls_wrap_tmp.cleanup_key_ctx)
+            {
+                free_key_ctx_bi(&tls_wrap_tmp.opt.key_ctx_bi);
+            }
             if (!status)
             {
                 goto error;
@@ -4121,6 +4173,30 @@ tls_check_ncp_cipher_list(const char *list)
     free(tmp_ciphers);
 
     return 0 < strlen(list) && !unsupported_cipher_found;
+}
+
+void
+show_available_tls_ciphers(const char *cipher_list,
+                           const char *cipher_list_tls13,
+                           const char *tls_cert_profile)
+{
+    printf("Available TLS Ciphers, listed in order of preference:\n");
+
+#if (ENABLE_CRYPTO_OPENSSL && OPENSSL_VERSION_NUMBER >= 0x1010100fL)
+    printf("\nFor TLS 1.3 and newer (--tls-ciphersuites):\n\n");
+    show_available_tls_ciphers_list(cipher_list_tls13, tls_cert_profile, true);
+#else
+    (void) cipher_list_tls13;  /* Avoid unused warning */
+#endif
+
+    printf("\nFor TLS 1.2 and older (--tls-cipher):\n\n");
+    show_available_tls_ciphers_list(cipher_list, tls_cert_profile, false);
+
+    printf("\n"
+           "Be aware that that whether a cipher suite in this list can actually work\n"
+           "depends on the specific setup of both peers. See the man page entries of\n"
+           "--tls-cipher and --show-tls for more details.\n\n"
+           );
 }
 
 /*

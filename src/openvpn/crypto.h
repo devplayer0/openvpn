@@ -278,11 +278,6 @@ void read_key_file(struct key2 *key2, const char *file, const unsigned int flags
  */
 int write_key_file(const int nkeys, const char *filename);
 
-int read_passphrase_hash(const char *passphrase_file,
-                         const md_kt_t *digest,
-                         uint8_t *output,
-                         int len);
-
 void generate_key_random(struct key *key, const struct key_type *kt);
 
 void check_replay_consistency(const struct key_type *kt, bool packet_id);
@@ -323,7 +318,7 @@ void free_key_ctx(struct key_ctx *ctx);
 
 void init_key_ctx_bi(struct key_ctx_bi *ctx, const struct key2 *key2,
                      int key_direction, const struct key_type *kt,
-		     const char *name);
+                     const char *name);
 
 void free_key_ctx_bi(struct key_ctx_bi *ctx);
 
@@ -423,7 +418,17 @@ void crypto_adjust_frame_parameters(struct frame *frame,
                                     bool packet_id_long_form);
 
 /** Return the worst-case OpenVPN crypto overhead (in bytes) */
-size_t crypto_max_overhead(void);
+unsigned int crypto_max_overhead(void);
+
+/**
+ * Generate a server key with enough randomness to fill a key struct
+ * and write to file.
+ *
+ * @param filename          Filename of the server key file to create.
+ * @param pem_name          The name to use in the PEM header/footer.
+ */
+void
+write_pem_key_file(const char *filename, const char *pem_name);
 
 /* Minimum length of the nonce used by the PRNG */
 #define NONCE_SECRET_LEN_MIN 16
@@ -461,6 +466,12 @@ void prng_init(const char *md_name, const int nonce_secret_len_parm);
 void prng_bytes(uint8_t *output, int len);
 
 void prng_uninit(void);
+
+/* an analogue to the random() function, but use prng_bytes */
+long int get_random(void);
+
+/** Print a cipher list entry */
+void print_cipher(const cipher_kt_t *cipher);
 
 void test_crypto(struct crypto_options *co, struct frame *f);
 
@@ -503,7 +514,8 @@ memcmp_constant_time(const void *a, const void *b, size_t size)
     int ret = 0;
     size_t i;
 
-    for (i = 0; i < size; i++) {
+    for (i = 0; i < size; i++)
+    {
         ret |= *a1++ ^ *b1++;
     }
 

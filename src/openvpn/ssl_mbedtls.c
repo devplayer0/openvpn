@@ -43,6 +43,7 @@
 #include "buffer.h"
 #include "misc.h"
 #include "manage.h"
+#include "pkcs11_backend.h"
 #include "ssl_common.h"
 
 #include <mbedtls/havege.h>
@@ -64,12 +65,12 @@
 static const mbedtls_x509_crt_profile openvpn_x509_crt_profile_legacy =
 {
     /* Hashes from SHA-1 and above */
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA1 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_RIPEMD160 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA224 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA256 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA384 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA512 ),
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA1 )
+    |MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_RIPEMD160 )
+    |MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA224 )
+    |MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA256 )
+    |MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA384 )
+    |MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA512 ),
     0xFFFFFFF, /* Any PK alg    */
     0xFFFFFFF, /* Any curve     */
     1024,      /* RSA-1024 and larger */
@@ -78,10 +79,10 @@ static const mbedtls_x509_crt_profile openvpn_x509_crt_profile_legacy =
 static const mbedtls_x509_crt_profile openvpn_x509_crt_profile_preferred =
 {
     /* SHA-2 and above */
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA224 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA256 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA384 ) |
-    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA512 ),
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA224 )
+    |MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA256 )
+    |MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA384 )
+    |MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA512 ),
     0xFFFFFFF, /* Any PK alg    */
     0xFFFFFFF, /* Any curve     */
     2048,      /* RSA-2048 and larger */
@@ -167,17 +168,7 @@ tls_ctx_free(struct tls_root_ctx *ctx)
         }
 
 #if defined(ENABLE_PKCS11)
-        if (ctx->priv_key_pkcs11 != NULL)
-        {
-            mbedtls_pkcs11_priv_key_free(ctx->priv_key_pkcs11);
-            free(ctx->priv_key_pkcs11);
-        }
-#endif
-#if defined(MANAGMENT_EXTERNAL_KEY)
-        if (ctx->external_key != NULL)
-        {
-            free(ctx->external_key);
-        }
+        pkcs11h_certificate_freeCertificate(ctx->pkcs11_cert);
 #endif
 
         if (ctx->allowed_ciphers)
@@ -229,6 +220,19 @@ tls_translate_cipher_name(const char *cipher_name)
     }
 
     return pair->iana_name;
+}
+
+void
+tls_ctx_restrict_ciphers_tls13(struct tls_root_ctx *ctx, const char *ciphers)
+{
+    if (ciphers == NULL)
+    {
+        /* Nothing to do, return without warning message */
+        return;
+    }
+
+    msg(M_WARN, "mbed TLS does not support setting tls-ciphersuites. "
+        "Ignoring TLS 1.3 cipher list: %s", ciphers);
 }
 
 void
@@ -295,7 +299,7 @@ tls_ctx_set_cert_profile(struct tls_root_ctx *ctx, const char *profile)
     }
     else
     {
-        msg (M_FATAL, "ERROR: Invalid cert profile: %s", profile);
+        msg(M_FATAL, "ERROR: Invalid cert profile: %s", profile);
     }
 }
 
@@ -462,13 +466,6 @@ tls_ctx_load_priv_file(struct tls_root_ctx *ctx, const char *priv_key_file,
     return 0;
 }
 
-#ifdef MANAGMENT_EXTERNAL_KEY
-
-
-struct external_context {
-    size_t signature_length;
-};
-
 /**
  * external_pkcs1_sign implements a mbed TLS rsa_sign_func callback, that uses
  * the management interface to request an RSA signature for the supplied hash.
@@ -495,11 +492,9 @@ external_pkcs1_sign( void *ctx_voidptr,
                      unsigned char *sig )
 {
     struct external_context *const ctx = ctx_voidptr;
-    char *in_b64 = NULL;
-    char *out_b64 = NULL;
     int rv;
-    unsigned char *p = sig;
-    size_t asn_len = 0, oid_size = 0, sig_len = 0;
+    uint8_t *to_sign = NULL;
+    size_t asn_len = 0, oid_size = 0;
     const char *oid = NULL;
 
     if (NULL == ctx)
@@ -535,12 +530,14 @@ external_pkcs1_sign( void *ctx_voidptr,
         asn_len = 10 + oid_size;
     }
 
-    sig_len = ctx->signature_length;
-    if ( (SIZE_MAX - hashlen) < asn_len || (hashlen + asn_len) > sig_len)
+    if ((SIZE_MAX - hashlen) < asn_len
+        || ctx->signature_length < (asn_len + hashlen))
     {
         return MBEDTLS_ERR_RSA_BAD_INPUT_DATA;
     }
 
+    ALLOC_ARRAY_CLEAR(to_sign, uint8_t, asn_len + hashlen);
+    uint8_t *p = to_sign;
     if (md_alg != MBEDTLS_MD_NONE)
     {
         /*
@@ -565,34 +562,16 @@ external_pkcs1_sign( void *ctx_voidptr,
         *p++ = MBEDTLS_ASN1_OCTET_STRING;
         *p++ = hashlen;
 
-        /* Determine added ASN length */
-        asn_len = p - sig;
+        /* Double-check ASN length */
+        ASSERT(asn_len == p - to_sign);
     }
 
     /* Copy the hash to be signed */
-    memcpy( p, hash, hashlen );
+    memcpy(p, hash, hashlen);
 
-    /* convert 'from' to base64 */
-    if (openvpn_base64_encode(sig, asn_len + hashlen, &in_b64) <= 0)
-    {
-        rv = MBEDTLS_ERR_RSA_BAD_INPUT_DATA;
-        goto done;
-    }
-
-    /* call MI for signature */
-    if (management)
-    {
-        out_b64 = management_query_pk_sig(management, in_b64);
-    }
-    if (!out_b64)
-    {
-        rv = MBEDTLS_ERR_RSA_PRIVATE_FAILED;
-        goto done;
-    }
-
-    /* decode base64 signature to binary and verify length */
-    if (openvpn_base64_decode(out_b64, sig, ctx->signature_length) !=
-        ctx->signature_length)
+    /* Call external signature function */
+    if (!ctx->sign(ctx->sign_ctx, to_sign, asn_len + hashlen, sig,
+                   ctx->signature_length))
     {
         rv = MBEDTLS_ERR_RSA_PRIVATE_FAILED;
         goto done;
@@ -601,14 +580,7 @@ external_pkcs1_sign( void *ctx_voidptr,
     rv = 0;
 
 done:
-    if (in_b64)
-    {
-        free(in_b64);
-    }
-    if (out_b64)
-    {
-        free(out_b64);
-    }
+    free(to_sign);
     return rv;
 }
 
@@ -621,23 +593,30 @@ external_key_len(void *vctx)
 }
 
 int
-tls_ctx_use_external_private_key(struct tls_root_ctx *ctx,
-                                 const char *cert_file, const char *cert_file_inline)
+tls_ctx_use_external_signing_func(struct tls_root_ctx *ctx,
+                                  external_sign_func sign_func, void *sign_ctx)
 {
     ASSERT(NULL != ctx);
 
-    tls_ctx_load_cert_file(ctx, cert_file, cert_file_inline);
-
     if (ctx->crt_chain == NULL)
     {
+        msg(M_WARN, "ERROR: external key requires a certificate.");
         return 1;
     }
 
-    ALLOC_OBJ_CLEAR(ctx->external_key, struct external_context);
-    ctx->external_key->signature_length = mbedtls_pk_get_len(&ctx->crt_chain->pk);
+    if (mbedtls_pk_get_type(&ctx->crt_chain->pk) != MBEDTLS_PK_RSA)
+    {
+        msg(M_WARN, "ERROR: external key with mbed TLS requires a "
+            "certificate with an RSA key.");
+        return 1;
+    }
+
+    ctx->external_key.signature_length = mbedtls_pk_get_len(&ctx->crt_chain->pk);
+    ctx->external_key.sign = sign_func;
+    ctx->external_key.sign_ctx = sign_ctx;
 
     ALLOC_OBJ_CLEAR(ctx->priv_key, mbedtls_pk_context);
-    if (!mbed_ok(mbedtls_pk_setup_rsa_alt(ctx->priv_key, ctx->external_key,
+    if (!mbed_ok(mbedtls_pk_setup_rsa_alt(ctx->priv_key, &ctx->external_key,
                                           NULL, external_pkcs1_sign, external_key_len)))
     {
         return 1;
@@ -645,7 +624,48 @@ tls_ctx_use_external_private_key(struct tls_root_ctx *ctx,
 
     return 0;
 }
-#endif /* ifdef MANAGMENT_EXTERNAL_KEY */
+
+#ifdef ENABLE_MANAGEMENT
+
+/** Query the management interface for a signature, see external_sign_func. */
+static bool
+management_sign_func(void *sign_ctx, const void *src, size_t src_len,
+                     void *dst, size_t dst_len)
+{
+    bool ret = false;
+    char *src_b64 = NULL;
+    char *dst_b64 = NULL;
+
+    if (!management || (openvpn_base64_encode(src, src_len, &src_b64) <= 0))
+    {
+        goto cleanup;
+    }
+
+    if (!(dst_b64 = management_query_pk_sig(management, src_b64)))
+    {
+        goto cleanup;
+    }
+
+    if (openvpn_base64_decode(dst_b64, dst, dst_len) != dst_len)
+    {
+        goto cleanup;
+    }
+
+    ret = true;
+cleanup:
+    free(src_b64);
+    free(dst_b64);
+
+    return ret;
+}
+
+int
+tls_ctx_use_management_external_key(struct tls_root_ctx *ctx)
+{
+    return tls_ctx_use_external_signing_func(ctx, management_sign_func, NULL);
+}
+
+#endif /* ifdef ENABLE_MANAGEMENT */
 
 void
 tls_ctx_load_ca(struct tls_root_ctx *ctx, const char *ca_file,
@@ -1327,9 +1347,15 @@ print_details(struct key_state_ssl *ks_ssl, const char *prefix)
 }
 
 void
-show_available_tls_ciphers(const char *cipher_list,
-                           const char *tls_cert_profile)
+show_available_tls_ciphers_list(const char *cipher_list,
+                                const char *tls_cert_profile,
+                                bool tls13)
 {
+    if (tls13)
+    {
+        /* mbed TLS has no TLS 1.3 support currently */
+        return;
+    }
     struct tls_root_ctx tls_ctx;
     const int *ciphers = mbedtls_ssl_list_ciphersuites();
 
@@ -1342,18 +1368,11 @@ show_available_tls_ciphers(const char *cipher_list,
         ciphers = tls_ctx.allowed_ciphers;
     }
 
-#ifndef ENABLE_SMALL
-    printf("Available TLS Ciphers,\n");
-    printf("listed in order of preference:\n\n");
-#endif
-
     while (*ciphers != 0)
     {
         printf("%s\n", mbedtls_ssl_get_ciphersuite_name(*ciphers));
         ciphers++;
     }
-    printf("\n" SHOW_TLS_CIPHER_LIST_WARNING);
-
     tls_ctx_free(&tls_ctx);
 }
 

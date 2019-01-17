@@ -26,6 +26,8 @@
 #define OPENVPN_WIN32_H
 
 #include "mtu.h"
+#include "openvpn-msg.h"
+#include "argv.h"
 
 /* location of executables */
 #define SYS_PATH_ENV_VAR_NAME "SystemRoot"  /* environmental variable name that normally contains the system path */
@@ -306,6 +308,20 @@ int win32_version_info(void);
  * https://msdn.microsoft.com/en-us/library/windows/desktop/ms724832(v=vs.85).aspx
  */
 const char *win32_version_string(struct gc_arena *gc, bool add_name);
+
+/*
+ * Send the |size| bytes in buffer |data| to the interactive service |pipe|
+ * and read the result in |ack|. Returns false on communication error.
+ * The string in |context| is used to prefix error messages.
+ */
+bool send_msg_iservice(HANDLE pipe, const void *data, size_t size,
+                       ack_message_t *ack, const char *context);
+
+/*
+ * Attempt to simulate fork/execve on Windows
+ */
+int
+openvpn_execve(const struct argv *a, const struct env_set *es, const unsigned int flags);
 
 #endif /* ifndef OPENVPN_WIN32_H */
 #endif /* ifdef _WIN32 */
