@@ -2643,9 +2643,21 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
             {
 #ifdef ENABLE_VLAN_TAGGING
                 uint16_t vid = 0;
+                if (m->top.options.vlan_tagging)
+                {
+                    if (vlan_filter_incoming_8021q_tag (&c->c2.to_tun))
+                    {
+                        /* Drop VLAN-tagged frame. */
+                        c->c2.to_tun.len = 0;
+                    }
+                    else
+                    {
+                        vid = c->options.vlan_pvid;
+                    }
+                }
 #else
                 const uint16_t vid = 0;
-#endif
+#endif /* ifdef ENABLE_VLAN_TAGGING */
 #ifdef ENABLE_PF
                 struct mroute_addr edest;
                 mroute_addr_reset(&edest);
