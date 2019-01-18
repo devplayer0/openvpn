@@ -2780,6 +2780,15 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
             return true;
         }
 
+#ifdef ENABLE_VLAN_TAGGING
+        if (dev_type == DEV_TYPE_TAP && m->top.options.vlan_tagging)
+        {
+            if ((vid = vlan_remove_8021q_tag (&m->top,
+                                              &m->top.c2.buf)) == -1)
+            return false;
+        }
+#endif
+
         /*
          * Route an incoming tun/tap packet to
          * the appropriate multi_instance object.
